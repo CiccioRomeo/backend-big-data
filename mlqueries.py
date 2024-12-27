@@ -1,28 +1,19 @@
 from pyspark.sql import SparkSession, DataFrame
 from pyspark.ml.feature import VectorAssembler
 from pyspark.ml.clustering import KMeans
-from pyspark.sql.functions import col, radians, sin, cos, sqrt, atan2, lit
-from pyspark.ml.functions import vector_to_array
+from pyspark.ml.fpm import FPGrowth
+from pyspark.sql.functions import col, expr,size
 import pandas as pd
+from pyspark.sql.types import ArrayType, StringType
+
 
 # Inizializzazione della SparkSession
 spark = SparkSession.builder.appName("KMeansClustering").getOrCreate()
 
-def haversine_distance(lat1, lon1, lat2, lon2):
-    """
-    Calcola la distanza tra due punti sulla superficie della Terra in metri usando la formula dell'Haversine.
-    """
-    R = 6371000  # Raggio medio della Terra in metri
-    dlat = radians(lat2 - lat1)
-    dlon = radians(lon2 - lon1)
-    a = sin(dlat / 2) ** 2 + cos(radians(lat1)) * cos(radians(lat2)) * sin(dlon / 2) ** 2
-    c = 2 * atan2(sqrt(a), sqrt(1 - a))
-    return R * c
-
 def run_kmeans_clustering(df: DataFrame, k: int) -> DataFrame:
     """
     Esegue il KMeans sul dataset, utilizzando come features la latitudine e la longitudine.
-    Restituisce un DataFrame con colonne: centroidX, centroidY, numElements, radius.
+    Restituisce un DataFrame con colonne: centroidX, centroidY, numElements.
     """
     # Appiattiamo latitude/longitude
     df_with_coords = (
@@ -62,28 +53,51 @@ def run_kmeans_clustering(df: DataFrame, k: int) -> DataFrame:
     clustered_df = model.transform(feature_df)
     cluster_sizes = clustered_df.groupBy("prediction").count()
 
-    # Convertiamo il vettore features in un array per estrarre i valori
-    clustered_df = clustered_df.withColumn("features_array", vector_to_array(col("features")))
-
-    # Unione con i centroidi
-    joined_df = clustered_df.join(centers_df, on="prediction")
-
-    # Calcolo della distanza utilizzando l'Haversine formula
-    distances_df = joined_df.withColumn(
-        "distance",
-        haversine_distance(
-            col("features_array")[0], col("features_array")[1],  # latitudine e longitudine del punto
-            col("centroidX"), col("centroidY")                 # latitudine e longitudine del centroide
-        )
-    )
-
-    # Calcolo del raggio massimo (distanza massima in metri)
-    max_distances = distances_df.groupBy("prediction").agg({"distance": "max"})
-    max_distances = max_distances.withColumnRenamed("max(distance)", "radius")
-
-    # Unione finale per ottenere dimensioni e raggi
-    final_df = cluster_sizes.join(centers_df, on="prediction").join(max_distances, on="prediction")
+    # Unione finale per ottenere dimensioni
+    final_df = cluster_sizes.join(centers_df, on="prediction")
 
     # Restituisce il DataFrame finale
-    return final_df.select("centroidX", "centroidY", "count", "radius")
+    return final_df.select("centroidX", "centroidY", "count")
 
+
+from pyspark.sql import DataFrame
+from pyspark.sql.functions import col, expr, size
+from pyspark.ml.fpm import FPGrowth
+
+def calculate_association_rules(df: DataFrame, 
+                                 min_support: float = 0.2, 
+                                 min_confidence: float = 0.6) -> DataFrame:
+    """
+    Calcola le regole di associazione dai dati usando FP-Growth, selezionando solo le colonne necessarie.
+    Gestisce valori nulli, liste vuote e rimuove duplicati.
+    
+    Args:
+        df (DataFrame): DataFrame Spark contenente i dati del dataset originale.
+        min_support (float): Soglia minima per considerare un itemset come frequente.
+        min_confidence (float): Soglia minima per considerare una regola valida.
+    
+    Returns:
+        DataFrame: DataFrame contenente le prime 10 regole di associazione con confidenza e lift.
+    """
+    # Estrai i valori di tag e ignora i valori nulli
+    df = df.withColumn("tags_list", expr("transform(tags, x -> x['value'])"))
+
+    # Filtra righe dove `tags_list` è null o lista vuota
+    df_filtered = df.filter((col("tags_list").isNotNull()) & (size(col("tags_list")) > 0))
+
+    # Rimuove duplicati all'interno di ogni lista
+    df_filtered = df_filtered.withColumn("unique_tags_list", expr("array_distinct(tags_list)"))
+
+    # Mantieni solo la colonna necessaria per FP-Growth
+    transactions_df = df_filtered.select("unique_tags_list").withColumnRenamed("unique_tags_list", "items")
+    
+    # Applica l'algoritmo FP-Growth
+    fpGrowth = FPGrowth(itemsCol="items", minSupport=min_support, minConfidence=min_confidence)
+    model = fpGrowth.fit(transactions_df)
+    
+    # Estrai le regole di associazione
+    association_rules = model.associationRules
+    
+
+    
+    return association_rules

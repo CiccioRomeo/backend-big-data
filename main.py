@@ -109,7 +109,7 @@ def main():
     )
 
     df = df.cache()
-    df.count()
+    print(df.count())
 
     #Avvio  della web app Flask, passando il DataFrame
     app = create_app(df)

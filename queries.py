@@ -1,6 +1,6 @@
 from pyspark.sql import DataFrame, Window
 from pyspark.sql.functions import (
-    col, year, month, count, explode, desc, sum, avg, max, size, abs, lit, row_number, udf
+    col, year, month, count, explode, desc, sum, avg, max, size, abs, lit, row_number, udf, coalesce, struct
 )
 from flickrapi_utils import fetch_avatar, construct_photo_url
 from pyspark.sql.types import StringType
@@ -132,7 +132,7 @@ def calculate_top_owners(df):
     window_spec_global = Window.orderBy(col("total_views").desc())
     final_df = final_df.withColumn("rank", row_number().over(window_spec_global))
 
-    final_df = final_df.filter(col("rank") <= 10)
+    final_df = final_df.filter(col("rank") <= 5)
 
     # Registrazione delle funzioni come UDF
     fetch_avatar_udf = udf(fetch_avatar, StringType())
@@ -152,6 +152,82 @@ def calculate_top_owners(df):
         "total_photos",
         "best_photo_url",
         "total_views"
+    )
+
+    return result_df
+
+def calculate_top_owners_v2(df):
+    # Validazione input
+    if df is None or df.rdd.isEmpty():
+        return None
+
+    # Registrazione UDF
+    fetch_avatar_udf = udf(fetch_avatar, StringType())
+    construct_photo_url_udf = udf(construct_photo_url, StringType())
+
+    # Ottimizzazione: Combina tutte le operazioni in un'unica pipeline
+    result_df = (df
+        .select(
+            col("owner.id").alias("user_id"),
+            col("owner.username").alias("username"),
+            coalesce(col("views"), lit(0)).alias("views"),
+            struct(
+                col("farm"),
+                col("server"),
+                col("id").alias("photo_id"),
+                col("secret"),
+                col("views")
+            ).alias("photo_data")
+        )
+        # Calcola le metriche per ogni owner
+        .groupBy("user_id", "username")
+        .agg(
+            sum("views").alias("total_views"),
+            count("photo_data.photo_id").alias("total_photos"),
+            max(struct("views", "photo_data")).alias("max_view_data")
+        )
+        # Estrai i dati della foto con più views
+        .select(
+            col("user_id"),
+            col("username"),
+            col("total_views"),
+            col("total_photos"),
+            col("max_view_data.photo_data.farm").alias("best_farm"),
+            col("max_view_data.photo_data.server").alias("best_server"),
+            col("max_view_data.photo_data.photo_id").alias("best_photo_id"),
+            col("max_view_data.photo_data.secret").alias("best_secret")
+        )
+        # Calcola il rank globale
+        .withColumn(
+            "rank",
+            row_number().over(Window.orderBy(col("total_views").desc()))
+        )
+        .filter(col("rank") <= 5)
+        # Aggiungi gli URL
+        .withColumn(
+            "avatar_url",
+            fetch_avatar_udf(col("user_id"))
+        )
+        .withColumn(
+            "best_photo_url",
+            construct_photo_url_udf(
+                col("best_farm"),
+                col("best_server"),
+                col("best_photo_id"),
+                col("best_secret")
+            )
+        )
+        # Seleziona e ordina le colonne finali
+        .select(
+            "rank",
+            "user_id",
+            "username",
+            "avatar_url",
+            "total_photos",
+            "best_photo_url",
+            "total_views"
+        )
+        .orderBy("rank")
     )
 
     return result_df

@@ -18,7 +18,7 @@ def create_app(df):
 
     @app.route("/top100Owners", methods=["GET"])
     def top_owners():
-        result_df = queries.calculate_top_owners(df)
+        result_df = queries.calculate_top_owners_v2(df)
         return jsonify([row.asDict() for row in result_df.collect()])
 
     @app.route("/getFirstRows", methods=["GET"])
@@ -139,6 +139,27 @@ def create_app(df):
             return jsonify([row.asDict() for row in result_df.collect()])
         except Exception as e:
             return jsonify({"error": str(e)}), 500
+        
+
+
+
+    @app.route("/tagAssociationRules", methods=["GET"])
+    def run_association_rules_algorithms():
+        try:
+            min_support = float(request.args.get("minSupport", 0.2))
+            min_confidence = float(request.args.get("minConfidence", 0.6))
+            
+            if (not isinstance(min_support, float) or min_support <= 0) or (not isinstance(min_confidence, float) or min_confidence <= 0):
+                return jsonify({"error": "Parameters must be positive floats"}), 400
+
+            # Esegui il metodo per calcolare le regole di associazione
+            result_df = mlqueries.calculate_association_rules(df, min_support, min_confidence).limit(1000)
+
+            # Restituisci i primi 10 risultati come risposta
+            return jsonify([row.asDict() for row in result_df.collect()])
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
+
         
 
     
