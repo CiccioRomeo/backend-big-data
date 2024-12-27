@@ -1,16 +1,41 @@
-# flickrapi_utils.py
-
-import requests
-import json
+import requests 
 
 API_KEY = "3c10f204adbefe00f9dcbcf2a760a3d6"
+BASE_URL = "https://api.flickr.com/services/rest/"
+
+
+def fetch_avatar(user_id):
+    params = {
+        "method": "flickr.people.getInfo",
+        "api_key": API_KEY,
+        "user_id": user_id,
+        "format": "json",
+        "nojsoncallback": 1,
+    }
+    try:
+        response = requests.get(BASE_URL, params=params)
+        if response.status_code == 200:
+            data = response.json()
+            iconfarm = data['person']['iconfarm']
+            iconserver = data['person']['iconserver']
+            if iconfarm and iconserver:
+                return f"https://farm{iconfarm}.staticflickr.com/{iconserver}/buddyicons/{user_id}.jpg"
+        return "https://www.flickr.com/images/buddyicon.gif"  # Avatar predefinito
+    except Exception as e:
+        return None
+
+
+def construct_photo_url(farm, server, photo_id, secret):
+    if farm and server and photo_id and secret:
+        return f"https://farm{farm}.staticflickr.com/{server}/{photo_id}_{secret}.jpg"
+    return None
+
 
 def get_comments(photo_id: str):
     """
     Richiama l'endpoint flickr.photos.comments.getList
     per ottenere i commenti di una foto.
     """
-    url = "https://api.flickr.com/services/rest/"
     params = {
         "method": "flickr.photos.comments.getList",
         "api_key": API_KEY,
@@ -18,7 +43,7 @@ def get_comments(photo_id: str):
         "format": "json",
         "nojsoncallback": "1"
     }
-    resp = requests.get(url, params=params)
+    resp = requests.get(BASE_URL, params=params)
     if resp.status_code == 200:
         data = resp.json()
         # data["comments"]["comment"] è la lista di commenti, in genere
@@ -28,6 +53,51 @@ def get_comments(photo_id: str):
             return []
     else:
         raise Exception(f"Errore API Flickr: {resp.status_code}, {resp.text}")
+    
+
+
+
+
+def get_photo_comments_count( photo_id):
+    """
+    Recupera il numero di commenti per una foto su Flickr utilizzando l'API Flickr.
+    
+    Parametri:
+    photo_id (str): L'ID della foto di cui vuoi contare i commenti
+    
+    Ritorna:
+    int: Il numero di commenti della foto
+    """
+
+    params = {
+        "method": "flickr.photos.getInfo",
+        "api_key": API_KEY,
+        "photo_id": photo_id,
+        "format": "json",
+        "nojsoncallback": 1
+    }
+    
+    try:
+        # Effettua la richiesta all'API
+        response = requests.get(BASE_URL, params=params)
+        response.raise_for_status()  # Solleva un'eccezione per risposte non 2xx
+        
+        # Parsing della risposta JSON
+        data = response.json()
+        
+        # Verifica se la richiesta ha avuto successo
+        if data["stat"] == "ok":
+            # Estrae il numero di commenti
+            comments_count = data["photo"]["comments"]["_content"]
+            return int(comments_count)
+        else:
+            raise Exception(f"Errore API Flickr: {data.get('message', 'Errore sconosciuto')}")
+            
+    except requests.exceptions.RequestException as e:
+        raise Exception(f"Errore nella richiesta HTTP: {str(e)}")
+    except (KeyError, ValueError) as e:
+        raise Exception(f"Errore nel parsing della risposta: {str(e)}")
+    
 
 def get_place_info(place_id: str):
     """
@@ -54,15 +124,10 @@ def get_place_info(place_id: str):
 
 # Esempio di utilizzo "standalone"
 if __name__ == "__main__":
-    test_photo_id = "2573762303"
-    test_place_id = "62ufGyBUUb26u2g"
-
+    user_id = "89107298@N00"
+    photo_id = "7121887983"
     try:
-        comments = get_comments(test_photo_id)
-        print("Esempio di commenti:", comments)
-
-        place_info = get_place_info(test_place_id)
-        print("Esempio di place info:", place_info)
-
+       #print(fetch_avatar(user_id))
+       print(get_photo_comments_count(photo_id))
     except Exception as ex:
         print("Errore:", ex)

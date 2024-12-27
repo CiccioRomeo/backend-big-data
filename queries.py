@@ -1,75 +1,52 @@
-from pyspark.sql import DataFrame
-from pyspark.sql.functions import col, year, hour, count, explode, desc, sum, array_contains, avg, when, month, size
+from pyspark.sql import DataFrame, Window
+from pyspark.sql.functions import (
+    col, year, month, count, explode, desc, sum, avg, max, size, abs, lit, row_number, udf
+)
+from flickrapi_utils import fetch_avatar, construct_photo_url
+from pyspark.sql.types import StringType
 
 
+# Utility function for efficient paging
+def paginate_dataframe_sql(df: DataFrame, page: int, page_size: int, order_col: str = None) -> DataFrame:
+    start_index = (page - 1) * page_size
+    end_index = start_index + page_size
 
+    if order_col:
+        window = Window.orderBy(col(order_col))
+        df = df.withColumn("row_number", row_number().over(window))
+    else:
+        df = df.withColumn("row_number", row_number().over(Window.orderBy(lit(1))))
 
+    return df.filter((col("row_number") > start_index) & (col("row_number") <= end_index)).drop("row_number")
 
-
-
+# Core queries
 def get_first_n_rows(df: DataFrame, n: int) -> DataFrame:
     return df.limit(n)
 
-
-
 def count_photos_by_coordinates(df: DataFrame, limit: int) -> DataFrame:
-    """
-    Raggruppa per coordinate e restituisce il numero di occorrenze per ciascuna combinazione di latitude e longitude,
-    limitando il numero di risultati.
-
-    :param df: Il DataFrame PySpark contenente i dati.
-    :param limit: Numero massimo di risultati da restituire.
-    :return: DataFrame con le coordinate e il conteggio delle occorrenze, limitato a un certo numero di righe.
-    """
-    return (df.groupBy(col("geoData.latitude").alias("latitude"), col("geoData.longitude").alias("longitude"))
-              .agg(count("*").alias("occurrences"))
-              .orderBy("occurrences", ascending=False)
+    return (df.groupBy(col("geoData.latitude"), col("geoData.longitude"))
+              .agg(count("id").alias("photoCount"))
+              .orderBy(desc("photoCount"))
               .limit(limit))
 
-
-#RICERCA
-def get_by_year(df: DataFrame, year_value: int, n: int) -> DataFrame:
-    return df.filter(year(col("datePosted")) == year_value).limit(n)
-
-def get_by_date_posted(df: DataFrame, year_value: int, n: int) -> DataFrame:
-    return df.filter(year(col("datePosted")) == year_value).limit(n)
+def get_photos_by_tag(df: DataFrame, tag: str) -> DataFrame:
+    return (df.filter(col("tags").isNotNull())
+              .filter(size(col("tags")) > 0)
+              .withColumn("tag", explode(col("tags.value")))
+              .filter(col("tag") == tag))
 
 def get_photos_by_date_range(df: DataFrame, start_date: str, end_date: str) -> DataFrame:
     return df.filter((col("dateTaken") >= start_date) & (col("dateTaken") <= end_date))
 
-def get_photos_by_tag(df: DataFrame, tag: str) -> DataFrame:
-    """
-    Restituisce le foto che contengono un determinato tag.
-    :param df: DataFrame PySpark contenente i dati.
-    :param tag: Il tag da cercare.
-    :return: DataFrame filtrato per il tag specifico.
-    """
-    # Filtra righe dove il campo tags è non nullo e contiene elementi
-    filtered_df = df.filter(col("tags").isNotNull()).filter(size(col("tags")) > 0)
-
-    # Esplodi l'array dei tag in righe separate
-    exploded_df = filtered_df.withColumn("tag", explode(col("tags")))
-
-    # Filtra per il valore del tag
-    result_df = exploded_df.filter(col("tag.value") == tag)
-
-    return result_df
-
-
 def get_photos_by_location(df: DataFrame, lat: float, lon: float, radius: float) -> DataFrame:
-    return df.filter((abs(col("geoData.latitude") - lat) <= radius) & (abs(col("geoData.longitude") - lon) <= radius))
-
-def get_photos_by_description_keyword(df: DataFrame, keyword: str) -> DataFrame:
-    return df.filter(col("description").contains(keyword))
-
-#Serie temporali
+    return df.filter((abs(col("geoData.latitude") - lat) <= radius) &
+                     (abs(col("geoData.longitude") - lon) <= radius))
 
 def photo_count_by_month(df: DataFrame) -> DataFrame:
     return (df.filter(col("dateTaken").isNotNull())
               .groupBy(month(col("dateTaken")).alias("month"))
               .agg(count("id").alias("count"))
               .orderBy("month"))
-
 
 def photo_count_by_year(df: DataFrame) -> DataFrame:
     return (df.filter(col("datePosted").isNotNull())
@@ -80,50 +57,23 @@ def photo_count_by_year(df: DataFrame) -> DataFrame:
 def photo_posted_per_month_by_year(df: DataFrame, input_year: int) -> DataFrame:
     return (df.filter((col("datePosted").isNotNull()) & (year(col("datePosted")) == input_year))
               .groupBy(month(col("datePosted")).alias("month"))
-              .count()
+              .agg(count("id").alias("count"))
               .orderBy("month"))
-
-#######TOP
-
-def top10_tags(df: DataFrame) -> DataFrame:
-    return (df
-      .withColumn("tagValue", explode(col("tags.value")))
-      .groupBy("tagValue")
-      .count()
-      .orderBy(desc("count"))
-      .limit(2000))
-
-def most_viewed_photos(df: DataFrame, n: int) -> DataFrame:
-    return (df.select("url", "owner.username", "views", "comments")
-              .orderBy(desc("views"))
-              .limit(n))
-
-# QUERY GEOGRAFICHE
-
-def count_photos_by_location(df: DataFrame) -> DataFrame:
-    return (df.groupBy(col("geoData.latitude"), col("geoData.longitude"))
-              .agg(count("id").alias("photoCount"))
-              .orderBy(desc("photoCount")))
-
-def count_photos_with_geotag(df: DataFrame) -> DataFrame:
-    return (df.withColumn("hasGeotag", when(col("geoData.latitude").isNotNull() & col("geoData.longitude").isNotNull(), 1).otherwise(0))
-              .groupBy("hasGeotag")
-              .agg(count("id").alias("photoCount")))
-
-def accuracy_distribution(df: DataFrame) -> DataFrame:
-    return (df.groupBy(col("geoData.accuracy"))
-              .agg(count("id").alias("photoCount"))
-              .orderBy("geoData.accuracy"))
-
-# QUERY TEMPORALI
-
-
 
 def average_time_to_post(df: DataFrame) -> DataFrame:
     return (df.withColumn("timeToPost", (col("datePosted").cast("long") - col("dateTaken").cast("long")) / 3600)
               .agg(avg("timeToPost").alias("avgHoursToPost")))
 
-# QUERY SUI METADATI
+def get_top_tags(df: DataFrame) -> DataFrame:
+    return (df.withColumn("tagValue", explode(col("tags.value")))
+              .groupBy("tagValue")
+              .agg(count("id").alias("count"))
+              .orderBy(desc("count")))
+
+def most_viewed_photos(df: DataFrame, n: int) -> DataFrame:
+    return (df.select("url", "owner.username", "views", "comments")
+              .orderBy(desc("views"))
+              .limit(n))
 
 def photo_public_private_distribution(df: DataFrame) -> DataFrame:
     return (df.groupBy("publicFlag")
@@ -136,41 +86,72 @@ def average_comments_and_views(df: DataFrame) -> DataFrame:
         avg("views").alias("avgViews")
     ))
 
-def photo_count_with_people(df: DataFrame) -> DataFrame:
-    return (df.groupBy("hasPeople")
-              .agg(count("id").alias("photoCount")))
-
-# QUERY SUI TAG
-
-def photo_count_by_tag_count(df: DataFrame) -> DataFrame:
-    return (df.withColumn("tagCount", col("tags.value").size)
-              .groupBy("tagCount")
-              .agg(count("id").alias("photoCount"))
-              .orderBy("tagCount"))
-
-# QUERY SUGLI UTENTI
-
-def top_n_owners_by_views(df: DataFrame, n: int) -> DataFrame:
-    return (df.groupBy("owner.username")
-              .agg(
-                  sum("views").alias("total_views"),
-                  count("*").alias("photos_posted")
-              )
-              .orderBy(desc("total_views"))
-              .limit(n))
-
-def most_active_users(df: DataFrame, n: int) -> DataFrame:
-    return (df.groupBy("owner.username")
-              .agg(count("id").alias("photoCount"))
-              .orderBy(desc("photoCount"))
-              .limit(n))
-
 def pro_users_vs_non_pro(df: DataFrame) -> DataFrame:
     return (df.groupBy("owner.pro")
               .agg(count("id").alias("photoCount"))
               .orderBy("owner.pro"))
 
-def average_photos_per_user(df: DataFrame) -> DataFrame:
-    return (df.groupBy("owner.username")
+def accuracy_distribution(df: DataFrame) -> DataFrame:
+    return (df.groupBy(col("geoData.accuracy"))
               .agg(count("id").alias("photoCount"))
-              .agg(avg("photoCount").alias("avgPhotosPerUser")))
+              .orderBy("geoData.accuracy"))
+
+
+
+def calculate_top_owners(df):
+    # Preparazione dei dati
+    owners_df = df.select(
+        col("owner.id").alias("user_id"),
+        col("owner.username").alias("username"),  # Aggiunto username
+        col("views"),
+        col("farm"),
+        col("server"),
+        col("id").alias("photo_id"),
+        col("secret")
+    )
+
+    # Calcolo delle statistiche per ogni owner
+    aggregated_df = owners_df.groupBy("user_id", "username").agg(  # Aggiunto username nel groupBy
+        sum("views").alias("total_views"),
+        count("photo_id").alias("total_photos"),
+        max(col("views")).alias("max_views")
+    )
+
+    window_spec = Window.partitionBy("user_id").orderBy(col("views").desc())
+    most_viewed_photo_df = owners_df.withColumn("rank", row_number().over(window_spec))
+    most_viewed_photo_df = most_viewed_photo_df.filter(col("rank") == 1).select(
+        "user_id",
+        col("farm").alias("best_farm"),
+        col("server").alias("best_server"),
+        col("photo_id").alias("best_photo_id"),
+        col("secret").alias("best_secret")
+    )
+
+    final_df = aggregated_df.join(most_viewed_photo_df, "user_id")
+
+    window_spec_global = Window.orderBy(col("total_views").desc())
+    final_df = final_df.withColumn("rank", row_number().over(window_spec_global))
+
+    final_df = final_df.filter(col("rank") <= 10)
+
+    # Registrazione delle funzioni come UDF
+    fetch_avatar_udf = udf(fetch_avatar, StringType())
+    construct_photo_url_udf = udf(construct_photo_url, StringType())
+
+    final_df = final_df.withColumn("avatar_url", fetch_avatar_udf(col("user_id")))
+    final_df = final_df.withColumn(
+        "best_photo_url",
+        construct_photo_url_udf(col("best_farm"), col("best_server"), col("best_photo_id"), col("best_secret"))
+    )
+
+    result_df = final_df.select(
+        "rank",
+        "user_id",
+        "username",  # Aggiunto username nella selezione finale
+        "avatar_url",
+        "total_photos",
+        "best_photo_url",
+        "total_views"
+    )
+
+    return result_df

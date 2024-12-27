@@ -1,147 +1,89 @@
-from pyspark.sql import DataFrame
-from pyspark.sql.functions import col, year, hour, count, explode, desc, sum, array_contains, avg, when, month, unix_timestamp
+from pyspark.sql import SparkSession, DataFrame
+from pyspark.ml.feature import VectorAssembler
+from pyspark.ml.clustering import KMeans
+from pyspark.sql.functions import col, radians, sin, cos, sqrt, atan2, lit
+from pyspark.ml.functions import vector_to_array
+import pandas as pd
 
+# Inizializzazione della SparkSession
+spark = SparkSession.builder.appName("KMeansClustering").getOrCreate()
 
-#RICERCA
-def get_by_year(df: DataFrame, year_value: int, n: int) -> DataFrame:
-    return df.filter(year(col("datePosted")) == year_value).limit(n)
+def haversine_distance(lat1, lon1, lat2, lon2):
+    """
+    Calcola la distanza tra due punti sulla superficie della Terra in metri usando la formula dell'Haversine.
+    """
+    R = 6371000  # Raggio medio della Terra in metri
+    dlat = radians(lat2 - lat1)
+    dlon = radians(lon2 - lon1)
+    a = sin(dlat / 2) ** 2 + cos(radians(lat1)) * cos(radians(lat2)) * sin(dlon / 2) ** 2
+    c = 2 * atan2(sqrt(a), sqrt(1 - a))
+    return R * c
 
-def get_by_date_posted(df: DataFrame, year_value: int, n: int) -> DataFrame:
-    return df.filter(year(col("datePosted")) == year_value).limit(n)
+def run_kmeans_clustering(df: DataFrame, k: int) -> DataFrame:
+    """
+    Esegue il KMeans sul dataset, utilizzando come features la latitudine e la longitudine.
+    Restituisce un DataFrame con colonne: centroidX, centroidY, numElements, radius.
+    """
+    # Appiattiamo latitude/longitude
+    df_with_coords = (
+        df.withColumn("latitude", col("geoData.latitude"))
+          .withColumn("longitude", col("geoData.longitude"))
+    )
 
-def get_photos_by_date_range(df: DataFrame, start_date: str, end_date: str) -> DataFrame:
-    return df.filter((col("dateTaken") >= start_date) & (col("dateTaken") <= end_date))
+    # Filtriamo i null e, se vuoi, i 0,0
+    filtered_df = df_with_coords.filter(
+        col("latitude").isNotNull() &
+        col("longitude").isNotNull() &
+        (col("latitude").between(-90, 90)) &
+        (col("longitude").between(-180, 180))
+    )
 
-def get_photos_by_tag(df: DataFrame, tag: str) -> DataFrame:
-    return (df.filter(col("tags.value").isNotNull())  # Rimuovi valori nulli
-              .filter(array_contains(col("tags.value"), tag))
-              .filter(col("datePosted").isNotNull())  # Verifica che datePosted sia valido
-              .filter(col("datePosted") > 0))  # Filtra valori invalidi
+    # Assembler
+    assembler = VectorAssembler(
+        inputCols=["latitude", "longitude"],
+        outputCol="features"
+    )
+    feature_df = assembler.transform(filtered_df).select("features")
 
-def get_photos_by_location(df: DataFrame, lat: float, lon: float, radius: float) -> DataFrame:
-    return df.filter((abs(col("geoData.latitude") - lat) <= radius) & (abs(col("geoData.longitude") - lon) <= radius))
+    # KMeans
+    kmeans = KMeans().setK(k).setFeaturesCol("features").setPredictionCol("prediction")
+    model = kmeans.fit(feature_df)
 
-def get_photos_by_description_keyword(df: DataFrame, keyword: str) -> DataFrame:
-    return df.filter(col("description").contains(keyword))
+    # Centri
+    centers = model.clusterCenters()
 
-#Serie temporali
+    # Creazione di un DataFrame con i centroidi
+    centers_df = spark.createDataFrame(
+        pd.DataFrame([(idx, float(center[0]), float(center[1])) for idx, center in enumerate(centers)],
+                     columns=["prediction", "centroidX", "centroidY"])
+    )
 
-def count_photos_taken_per_hour(df: DataFrame) -> DataFrame:
-    return (df.filter(col("dateTaken").isNotNull())
-              .groupBy(hour(col("dateTaken")).alias("hour"))
-              .agg(count("id").alias("photoCount"))
-              .orderBy("hour"))
+    # Calcolo dei numeri di elementi per ciascun cluster
+    clustered_df = model.transform(feature_df)
+    cluster_sizes = clustered_df.groupBy("prediction").count()
 
-def count_photos_posted_per_hour(df: DataFrame) -> DataFrame:
-    return (df.filter(col("datePosted").isNotNull())
-              .groupBy(hour(col("datePosted")).alias("hour"))
-              .agg(count("id").alias("photoCount"))
-              .orderBy("hour"))
+    # Convertiamo il vettore features in un array per estrarre i valori
+    clustered_df = clustered_df.withColumn("features_array", vector_to_array(col("features")))
 
-def photo_count_by_year(df: DataFrame) -> DataFrame:
-    return (df.filter(col("datePosted").isNotNull())
-              .groupBy(year(col("datePosted")).alias("year"))
-              .count()
-              .orderBy("year"))
+    # Unione con i centroidi
+    joined_df = clustered_df.join(centers_df, on="prediction")
 
-def photos_taken_per_year(df: DataFrame) -> DataFrame:
-    return (df.filter(col("dateTaken").isNotNull())
-              .groupBy(year(col("dateTaken")).alias("year"))
-              .count()
-              .orderBy("year"))
+    # Calcolo della distanza utilizzando l'Haversine formula
+    distances_df = joined_df.withColumn(
+        "distance",
+        haversine_distance(
+            col("features_array")[0], col("features_array")[1],  # latitudine e longitudine del punto
+            col("centroidX"), col("centroidY")                 # latitudine e longitudine del centroide
+        )
+    )
 
-#######TOP
+    # Calcolo del raggio massimo (distanza massima in metri)
+    max_distances = distances_df.groupBy("prediction").agg({"distance": "max"})
+    max_distances = max_distances.withColumnRenamed("max(distance)", "radius")
 
-def top10_tags(df: DataFrame) -> DataFrame:
-    return (df
-      .withColumn("tagValue", explode(col("tags.value")))
-      .groupBy("tagValue")
-      .count()
-      .orderBy(desc("count"))
-      .limit(2000))
+    # Unione finale per ottenere dimensioni e raggi
+    final_df = cluster_sizes.join(centers_df, on="prediction").join(max_distances, on="prediction")
 
-def most_viewed_photos(df: DataFrame, n: int) -> DataFrame:
-    return (df.select("url", "owner.username", "views", "comments")
-              .orderBy(desc("views"))
-              .limit(n))
+    # Restituisce il DataFrame finale
+    return final_df.select("centroidX", "centroidY", "count", "radius")
 
-# QUERY GEOGRAFICHE
-
-def count_photos_by_location(df: DataFrame) -> DataFrame:
-    return (df.groupBy(col("geoData.latitude"), col("geoData.longitude"))
-              .agg(count("id").alias("photoCount"))
-              .orderBy(desc("photoCount")))
-
-def count_photos_with_geotag(df: DataFrame) -> DataFrame:
-    return (df.withColumn("hasGeotag", when(col("geoData.latitude").isNotNull() & col("geoData.longitude").isNotNull(), 1).otherwise(0))
-              .groupBy("hasGeotag")
-              .agg(count("id").alias("photoCount")))
-
-def accuracy_distribution(df: DataFrame) -> DataFrame:
-    return (df.groupBy(col("geoData.accuracy"))
-              .agg(count("id").alias("photoCount"))
-              .orderBy("geoData.accuracy"))
-
-# QUERY TEMPORALI
-
-def photo_count_by_month(df: DataFrame) -> DataFrame:
-    return (df.filter(col("dateTaken").isNotNull())
-              .groupBy(month(col("dateTaken")).alias("month"))
-              .agg(count("id").alias("photoCount"))
-              .orderBy("month"))
-
-def average_time_to_post(df: DataFrame) -> DataFrame:
-    return (df.withColumn("timeToPost", (col("datePosted").cast("long") - col("dateTaken").cast("long")) / 3600)
-              .agg(avg("timeToPost").alias("avgHoursToPost")))
-
-# QUERY SUI METADATI
-
-def photo_public_private_distribution(df: DataFrame) -> DataFrame:
-    return (df.groupBy("publicFlag")
-              .agg(count("id").alias("photoCount"))
-              .orderBy("publicFlag"))
-
-def average_comments_and_views(df: DataFrame) -> DataFrame:
-    return (df.agg(
-        avg("comments").alias("avgComments"),
-        avg("views").alias("avgViews")
-    ))
-
-def photo_count_with_people(df: DataFrame) -> DataFrame:
-    return (df.groupBy("hasPeople")
-              .agg(count("id").alias("photoCount")))
-
-# QUERY SUI TAG
-
-def photo_count_by_tag_count(df: DataFrame) -> DataFrame:
-    return (df.withColumn("tagCount", col("tags.value").size)
-              .groupBy("tagCount")
-              .agg(count("id").alias("photoCount"))
-              .orderBy("tagCount"))
-
-# QUERY SUGLI UTENTI
-
-def top_n_owners_by_views(df: DataFrame, n: int) -> DataFrame:
-    return (df.groupBy("owner.username")
-              .agg(
-                  sum("views").alias("total_views"),
-                  count("*").alias("photos_posted")
-              )
-              .orderBy(desc("total_views"))
-              .limit(n))
-
-def most_active_users(df: DataFrame, n: int) -> DataFrame:
-    return (df.groupBy("owner.username")
-              .agg(count("id").alias("photoCount"))
-              .orderBy(desc("photoCount"))
-              .limit(n))
-
-def pro_users_vs_non_pro(df: DataFrame) -> DataFrame:
-    return (df.groupBy("owner.pro")
-              .agg(count("id").alias("photoCount"))
-              .orderBy("owner.pro"))
-
-def average_photos_per_user(df: DataFrame) -> DataFrame:
-    return (df.groupBy("owner.username")
-              .agg(count("id").alias("photoCount"))
-              .agg(avg("photoCount").alias("avgPhotosPerUser")))
