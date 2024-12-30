@@ -1,6 +1,6 @@
 from pyspark.sql import DataFrame, Window
 from pyspark.sql.functions import (
-    col, year, month, count, explode, desc, sum, avg, max, size, abs, lit, row_number, udf, coalesce, struct
+    col, year, month, count, explode, desc, sum, avg, max, size, abs, lit, row_number, udf, coalesce, struct, lower
 )
 from flickrapi_utils import fetch_avatar, construct_photo_url
 from pyspark.sql.types import StringType
@@ -23,11 +23,10 @@ def paginate_dataframe_sql(df: DataFrame, page: int, page_size: int, order_col: 
 def get_first_n_rows(df: DataFrame, n: int) -> DataFrame:
     return df.limit(n)
 
-def count_photos_by_coordinates(df: DataFrame, limit: int) -> DataFrame:
+def count_photos_by_coordinates(df: DataFrame) -> DataFrame:
     return (df.groupBy(col("geoData.latitude"), col("geoData.longitude"))
               .agg(count("id").alias("photoCount"))
-              .orderBy(desc("photoCount"))
-              .limit(limit))
+              .orderBy(desc("photoCount")))
 
 def get_photos_by_tag(df: DataFrame, tag: str) -> DataFrame:
     return (df.filter(col("tags").isNotNull())
@@ -69,34 +68,6 @@ def get_top_tags(df: DataFrame) -> DataFrame:
               .groupBy("tagValue")
               .agg(count("id").alias("count"))
               .orderBy(desc("count")))
-
-def most_viewed_photos(df: DataFrame, n: int) -> DataFrame:
-    return (df.select("url", "owner.username", "views", "comments")
-              .orderBy(desc("views"))
-              .limit(n))
-
-def photo_public_private_distribution(df: DataFrame) -> DataFrame:
-    return (df.groupBy("publicFlag")
-              .agg(count("id").alias("photoCount"))
-              .orderBy("publicFlag"))
-
-def average_comments_and_views(df: DataFrame) -> DataFrame:
-    return (df.agg(
-        avg("comments").alias("avgComments"),
-        avg("views").alias("avgViews")
-    ))
-
-def pro_users_vs_non_pro(df: DataFrame) -> DataFrame:
-    return (df.groupBy("owner.pro")
-              .agg(count("id").alias("photoCount"))
-              .orderBy("owner.pro"))
-
-def accuracy_distribution(df: DataFrame) -> DataFrame:
-    return (df.groupBy(col("geoData.accuracy"))
-              .agg(count("id").alias("photoCount"))
-              .orderBy("geoData.accuracy"))
-
-
 
 def calculate_top_owners(df):
     # Preparazione dei dati
@@ -231,3 +202,93 @@ def calculate_top_owners_v2(df):
     )
 
     return result_df
+
+def search_photos(df, keyword=None, dataInizio=None, dataFine=None, tag_list=None):
+    # Keyword in lowercase per confronti insensibili al case
+    keyword_lower = keyword.lower() if keyword else None
+    construct_photo_url_udf = udf(construct_photo_url, StringType())
+
+    # Iniziamo con un DataFrame base che contiene tutte le righe
+    filtered_df = df
+
+    # Filtra per keyword
+    if keyword:
+        # Preparazione: Aggiunge una colonna esplosa per i tag
+        df_with_exploded_tags = filtered_df.withColumn("exploded_tag", explode(col("tags.value")))
+
+        # Filtra in base alla keyword
+        filtered_df = df_with_exploded_tags.filter(
+            (lower(col("title")).contains(keyword_lower)) |
+            (lower(col("description")).contains(keyword_lower)) |
+            (lower(col("exploded_tag")).contains(keyword_lower)) |
+            (lower(col("owner.username")).contains(keyword_lower))
+        ).drop("exploded_tag")  # Rimuove la colonna temporanea
+
+    # Filtra per intervallo di date, se specificato
+    if dataInizio or dataFine:
+        if dataInizio and not dataFine:
+            filtered_df = filtered_df.filter(col("datePosted") >= lit(dataInizio))
+        elif dataFine and not dataInizio:
+            filtered_df = filtered_df.filter(col("datePosted") <= lit(dataFine))
+        elif dataInizio and dataFine:
+            filtered_df = filtered_df.filter(
+                (col("datePosted") >= lit(dataInizio)) & (col("datePosted") <= lit(dataFine))
+            )
+
+    # Filtra per tag, se specificato
+    if tag_list:
+        tag_list_lower = [tag.lower() for tag in tag_list]
+
+        # Usa un filtro per verificare se il tag esploso è in tag_list
+        df_with_exploded_tags = filtered_df.withColumn("exploded_tag", explode(col("tags.value")))
+        tag_filter = df_with_exploded_tags.filter(
+            lower(col("exploded_tag")).isin(tag_list_lower)
+        ).drop("exploded_tag")  # Rimuove la colonna temporanea
+
+        # Unione dei risultati se esiste un filtro keyword
+        if keyword:
+            filtered_df = filtered_df.union(tag_filter).distinct()
+        else:
+            filtered_df = tag_filter
+
+    # Rimuovere duplicati in base alla chiave primaria logica (esempio: 'id')
+    filtered_df = filtered_df.dropDuplicates(["id"])
+
+    # Aggiunge la colonna con l'URL costruito
+    filtered_df = filtered_df.withColumn(
+        "urlFoto", 
+        construct_photo_url_udf(col("farm"), col("server"), col("id"), col("secret"))
+    )
+
+    # Seleziona i campi richiesti per l'output
+    result_df = filtered_df.select(
+        col("urlFoto").alias("url"),
+        col("owner.username").alias("username"),
+        col("tags.value").alias("tags"),
+        col("views").alias("views"),
+        col("title").alias("title"),
+        col("description").alias("description"),
+        col("dateTaken")
+    )
+
+    return result_df
+
+def get_years(df: DataFrame) -> DataFrame:
+    """
+    Restituisce una lista degli anni univoci basati sul campo 'datePosted'.
+    """
+    return (df.filter(col("datePosted").isNotNull())
+              .select(year(col("datePosted")).alias("year"))
+              .distinct()
+              .orderBy("year"))
+
+def get_all_tags(df: DataFrame) -> DataFrame:
+    """
+    Restituisce tutti i tag univoci presenti nel dataset.
+    """
+    return (df.filter(col("tags").isNotNull())
+              .withColumn("tag", explode(col("tags.value")))
+              .select("tag")
+              .distinct()
+              .orderBy("tag"))
+

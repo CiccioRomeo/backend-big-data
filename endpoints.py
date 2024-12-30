@@ -2,8 +2,9 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 import queries
 import mlqueries
+from flask_compress import Compress
 
-
+import math
 mappa_mesi = {
         1: "Gennaio", 2: "Febbraio", 3: "Marzo", 4: "Aprile",
         5: "Maggio", 6: "Giugno", 7: "Luglio", 8: "Agosto",
@@ -14,9 +15,10 @@ mappa_mesi = {
 def create_app(df):
     app = Flask(__name__)
     CORS(app)
+    Compress(app)
 
 
-    @app.route("/top100Owners", methods=["GET"])
+    @app.route("/top5Owners", methods=["GET"])
     def top_owners():
         result_df = queries.calculate_top_owners_v2(df)
         return jsonify([row.asDict() for row in result_df.collect()])
@@ -29,9 +31,11 @@ def create_app(df):
 
     @app.route("/photosByCoordinates", methods=["GET"])
     def photos_by_coordinates():
-        limit = int(request.args.get("limit", 10))
-        result_df = queries.count_photos_by_coordinates(df, limit)
-        return jsonify([row.asDict() for row in result_df.collect()])
+        result_df = queries.count_photos_by_coordinates(df)
+        # Utilizziamo delle tuple per risparmiare spazio
+        data = [[row["latitude"], row["longitude"], row["photoCount"]] for row in result_df.collect()]
+        return jsonify(data)
+
 
     @app.route("/photosByTag", methods=["GET"])
     def photos_by_tag():
@@ -89,37 +93,15 @@ def create_app(df):
     def top_tags():
         page = int(request.args.get("page", 1))
         page_size = int(request.args.get("page_size", 100))
-        filtered_df = queries.get_top_tags(df)
-        paginated_df = queries.paginate_dataframe_sql(filtered_df, page, page_size)
+        result_df = queries.get_top_tags(df)
+        paginated_df = queries.paginate_dataframe_sql(result_df, page, page_size)
         return jsonify([row.asDict() for row in paginated_df.collect()])
-
 
     @app.route("/mostViewedPhotos", methods=["GET"])
     def most_viewed_photos():
         n = int(request.args.get("limit", 10))
         result_df = queries.most_viewed_photos(df, n)
         return jsonify([row.asDict() for row in result_df.collect()])
-
-    @app.route("/photoPublicPrivateDistribution", methods=["GET"])
-    def photo_public_private_distribution():
-        result_df = queries.photo_public_private_distribution(df)
-        return jsonify([row.asDict() for row in result_df.collect()])
-
-    @app.route("/averageCommentsAndViews", methods=["GET"])
-    def average_comments_and_views():
-        result_df = queries.average_comments_and_views(df)
-        return jsonify(result_df.collect()[0].asDict())
-
-    @app.route("/proUsersVsNonPro", methods=["GET"])
-    def pro_users_vs_non_pro():
-        result_df = queries.pro_users_vs_non_pro(df)
-        return jsonify([row.asDict() for row in result_df.collect()])
-
-    @app.route("/accuracyDistribution", methods=["GET"])
-    def accuracy_distribution():
-        result_df = queries.accuracy_distribution(df)
-        return jsonify([row.asDict() for row in result_df.collect()])
-    
 
 
     @app.route("/runKMeans", methods=["GET"])
@@ -153,7 +135,7 @@ def create_app(df):
                 return jsonify({"error": "Parameters must be positive floats"}), 400
 
             # Esegui il metodo per calcolare le regole di associazione
-            result_df = mlqueries.calculate_association_rules(df, min_support, min_confidence).limit(1000)
+            result_df = mlqueries.calculate_association_rules(df, min_support, min_confidence)
 
             # Restituisci i primi 10 risultati come risposta
             return jsonify([row.asDict() for row in result_df.collect()])
@@ -162,7 +144,53 @@ def create_app(df):
 
         
 
-    
+
+    @app.route('/search_photos', methods=['POST'])
+    def search_photos_endpoint():
+        try:
+            # Recupera i parametri dal corpo della richiesta JSON
+            data = request.get_json()  # Corretto per POST con dati JSON
+            if data is None:
+                return jsonify({"error": "No JSON data provided"}), 400
+
+            keyword = data.get('keyword')
+            data_inizio = data.get('dataInizio')
+            data_fine = data.get('dataFine')
+            tag_list = data.get('tag_list', [])  # Valore predefinito come lista vuota
+            page = int(request.args.get("page", 1))
+            page_size = int(request.args.get("page_size", 100))
+            # Esegui la query
+            result_df = queries.search_photos(df, keyword=keyword, dataInizio=data_inizio, dataFine=data_fine, tag_list=tag_list)
+            paginated_df = queries.paginate_dataframe_sql(result_df, page, page_size)
+            # Converto il risultato in un formato leggibile
+            return jsonify([row.asDict() for row in paginated_df.collect()])
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
+        
+
+
+    @app.route('/years', methods=['GET'])
+    def get_years_list():
+        try:
+            # Esegui la query
+            result_df = queries.get_years(df)
+            return jsonify([row.asDict() for row in result_df.collect()])
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
+
+    @app.route('/tags', methods=['GET'])
+    def get_tag():
+        try:
+            page = int(request.args.get("page", 1))
+            page_size = int(request.args.get("page_size", 100))
+            # Esegui la query
+            result_df = queries.get_all_tags(df)
+            paginated_df = queries.paginate_dataframe_sql(result_df, page, page_size)
+            return jsonify([row.asDict() for row in paginated_df.collect()])
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
+
+
 
     return app
 

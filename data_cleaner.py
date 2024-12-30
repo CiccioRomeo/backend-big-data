@@ -1,18 +1,16 @@
 from pyspark.sql import SparkSession
 from pyspark.sql.types import *
-from endpoints import create_app
+from pyspark.sql.functions import col, when, lit
 
 def main():
     # SparkSession
     spark = (SparkSession.builder
         .appName("BigData_Romeo_Ruggiero_PySpark")
-        .config("spark.master", "local[*]")
-        .config("spark.driver.memory", "2g")
-        .config("spark.executor.memory", "1g")
+        .master("local[*]")
         .config("spark.driver.bindAddress", "127.0.0.1")
-        .config("spark.network.timeout", "600s")
-        .config("spark.executor.heartbeatInterval", "100s")
-        .config("spark.driver.maxResultSize", "2g")
+        .config("spark.network.timeout", "600s")  
+        .config("spark.executor.heartbeatInterval", "100s") 
+        .config("spark.driver.maxResultSize", "2g") 
         .getOrCreate())
 
     # Definizione Schema
@@ -78,17 +76,28 @@ def main():
     ])
 
     # Leggi il file JSON
-    path = "Data/flickr_cleaned.json"
+    path = "Data/flickr2x.json"
     df = spark.read.schema(schema).json(path)
 
+    # 4) Pulizia e trasformazioni
+    # Rimuove duplicati
+    df = df.dropDuplicates()
 
-    df = df.cache()
-    print(df.count())
+    # Escludi date non valide nel campo "dateTaken"
+    df = df.withColumn(
+        "dateTaken",
+        when(
+            col("dateTaken").isin("Jan 1, 0001 12:00:00 AM", "Jan 1, 1000 12:00:00 AM"),
+            lit(None)
+        ).otherwise(col("dateTaken"))
+    )
 
-    #Avvio  della web app Flask, passando il DataFrame
-    app = create_app(df)
-    app.run(host="127.0.0.1", port=8081, debug=False)
+    # Filtra foto postate dal 2000 in poi (confronto sul prefisso della stringa)
+    df = df.filter(col("datePosted").rlike("^\\w+ \\d+, (20\\d{2}|\\d{3})"))
 
+    # Salva il dataset pulito in formato JSON
+    output_path = "Data/cleaned_flickr2x.json"
+    df.coalesce(1).write.mode("overwrite").json(output_path)
 
 if __name__ == "__main__":
     main()
