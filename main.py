@@ -5,14 +5,6 @@ from endpoints import create_app
 def main():
     # SparkSession
     spark = (SparkSession.builder
-        .appName("BigData_Romeo_Ruggiero_PySpark")
-        .config("spark.master", "local[*]")
-        .config("spark.driver.memory", "2g")
-        .config("spark.executor.memory", "1g")
-        .config("spark.driver.bindAddress", "127.0.0.1")
-        .config("spark.network.timeout", "600s")
-        .config("spark.executor.heartbeatInterval", "100s")
-        .config("spark.driver.maxResultSize", "2g")
         .getOrCreate())
 
     # Definizione Schema
@@ -87,7 +79,7 @@ def main():
 
     #Avvio  della web app Flask, passando il DataFrame
     app = create_app(df)
-    app.run(host="127.0.0.1", port=8081, debug=False)
+    app.run(host="127.0.0.1", port=8080, debug=False)
 
 
 if __name__ == "__main__":

@@ -2,18 +2,20 @@ from pyspark.sql import SparkSession, DataFrame
 from pyspark.ml.feature import VectorAssembler
 from pyspark.ml.clustering import KMeans
 from pyspark.ml.fpm import FPGrowth
-from pyspark.sql.functions import col, expr,size
+from pyspark.sql.functions import col, expr,size, array_contains
 import pandas as pd
-from pyspark.sql.types import ArrayType, StringType
-
+from pyspark.sql.types import array
+from pyspark.ml.fpm import FPGrowth
 
 # Inizializzazione della SparkSession
-spark = SparkSession.builder.appName("KMeansClustering").getOrCreate()
+spark = SparkSession.builder.appName("MLQueries").getOrCreate()
 
-def run_kmeans_clustering(df: DataFrame, k: int) -> DataFrame:
+def run_kmeans_clustering(df: DataFrame, k: int) -> dict:
     """
     Esegue il KMeans sul dataset, utilizzando come features la latitudine e la longitudine.
-    Restituisce un DataFrame con colonne: centroidX, centroidY, numElements.
+    Restituisce un dizionario con:
+    - "labels": una lista di liste contenente latitude, longitude e label assegnata.
+    - "centroids": una lista di liste contenente le coordinate dei centroidi.
     """
     # Appiattiamo latitude/longitude
     df_with_coords = (
@@ -34,85 +36,50 @@ def run_kmeans_clustering(df: DataFrame, k: int) -> DataFrame:
         inputCols=["latitude", "longitude"],
         outputCol="features"
     )
-    feature_df = assembler.transform(filtered_df).select("features")
+    feature_df = assembler.transform(filtered_df).select("latitude", "longitude", "features")
 
     # KMeans
     kmeans = KMeans().setK(k).setFeaturesCol("features").setPredictionCol("prediction")
     model = kmeans.fit(feature_df)
 
-    # Centri
-    centers = model.clusterCenters()
+    # Preparazione delle label
+    labeled_coordinates_df = model.transform(feature_df).select("latitude", "longitude", "prediction").distinct()
+    labels = labeled_coordinates_df.collect()
+    labels_list = [[row.latitude, row.longitude, row.prediction] for row in labels]
 
-    # Creazione di un DataFrame con i centroidi
-    centers_df = spark.createDataFrame(
-        pd.DataFrame([(idx, float(center[0]), float(center[1])) for idx, center in enumerate(centers)],
-                     columns=["prediction", "centroidX", "centroidY"])
-    )
+    # Preparazione dei centroidi
+    centroids = model.clusterCenters()
+    centroids_list = [[center[0], center[1]] for center in centroids]
 
-    # Calcolo dei numeri di elementi per ciascun cluster
-    clustered_df = model.transform(feature_df)
-    cluster_sizes = clustered_df.groupBy("prediction").count()
+    # Creazione del dizionario di output
+    result = {
+        "labels": labels_list,
+        "centroids": centroids_list
+    }
 
-    # Unione finale per ottenere dimensioni
-    final_df = cluster_sizes.join(centers_df, on="prediction")
-
-    # Restituisce il DataFrame finale
-    return final_df.select("centroidX", "centroidY", "count")
-
-
-from pyspark.sql import DataFrame
-from pyspark.sql.functions import col, expr, size
-from pyspark.ml.fpm import FPGrowth
-
-from pyspark.sql.functions import col, array_contains, array, expr, lit
-from pyspark.sql import DataFrame
+    return result
 
 def calculate_and_filter_association_rules(
-    df: DataFrame, 
-    min_support: float = 0.2, 
-    min_confidence: float = 0.6, 
-    target_tags: list = None
-) -> DataFrame:
-    """
-    Calcola le regole di associazione dai dati e opzionalmente filtra le regole
-    per trovare quelle che hanno gli antecedenti specificati.
-
-    Args:
-        df (DataFrame): DataFrame Spark contenente i dati del dataset originale.
-        min_support (float): Soglia minima per considerare un itemset come frequente.
-        min_confidence (float): Soglia minima per considerare una regola valida.
-        target_tags (list, optional): Lista di tag da utilizzare come antecedenti per il filtro.
-                                      Se None, restituisce tutte le regole di associazione.
-
-    Returns:
-        DataFrame: DataFrame contenente le regole di associazione (filtrate se target_tags è fornito).
-    """
-    # Estrai i valori di tag e ignora i valori nulli
+    df, 
+    min_support=0.2, 
+    min_confidence=0.6, 
+    target_tags=None
+):
     df = df.withColumn("tags_list", expr("transform(tags, x -> x['value'])"))
-
-    # Filtra righe dove `tags_list` è null o lista vuota
     df_filtered = df.filter((col("tags_list").isNotNull()) & (size(col("tags_list")) > 0))
-
-    # Rimuove duplicati all'interno di ogni lista
     df_filtered = df_filtered.withColumn("unique_tags_list", expr("array_distinct(tags_list)"))
-
-    # Mantieni solo la colonna necessaria per FP-Growth
     transactions_df = df_filtered.select("unique_tags_list").withColumnRenamed("unique_tags_list", "items")
 
-    # Applica l'algoritmo FP-Growth
     fpGrowth = FPGrowth(itemsCol="items", minSupport=min_support, minConfidence=min_confidence)
     model = fpGrowth.fit(transactions_df)
 
-    # Estrai le regole di associazione
     association_rules = model.associationRules
 
-    # Se target_tags è fornito, filtra le regole di associazione
     if target_tags:
-        # Converti la lista di target_tags in una colonna Spark di array
-        target_tags_array = array(*[lit(tag) for tag in target_tags])
-
         # Filtra le regole di associazione per gli antecedenti
-        association_rules = association_rules.filter(col("antecedent") == target_tags_array)
+        association_rules = association_rules.filter(
+            array_contains(col("antecedent"), target_tags[0])
+        )
 
     return association_rules
 
