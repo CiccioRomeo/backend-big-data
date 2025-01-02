@@ -2,7 +2,7 @@ import os
 import shutil
 
 # Percorso della directory temporanea
-temp_dir = r"C:\\Users\\romeo\\AppData\\Local\\Temp"
+temp_dir = r"C:\\Users\\fraro\\AppData\\Local\\Temp"
 
 # Cerca ed elimina le cartelle che iniziano con "blockmgr-"
 for folder in os.listdir(temp_dir):

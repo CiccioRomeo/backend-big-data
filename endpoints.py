@@ -33,7 +33,6 @@ def create_app(df):
             return jsonify({"error": str(e)}), 500
 
 
-
     @app.route("/photosByTag", methods=["GET"])
     def photos_by_tag():
         try:
@@ -127,8 +126,8 @@ def create_app(df):
     @app.route("/averageTimeToPost", methods=["GET"])
     def average_time_to_post():
         try:
-            result_df = queries.calculate_average_time_to_post(df).collect()
-            return jsonify(result_df)
+            result_df = queries.calculate_average_time_to_post(df)
+            return jsonify([row.asDict() for row in result_df.collect()])
         except Exception as e:
             return jsonify({"error": str(e)}), 500
 
@@ -136,9 +135,72 @@ def create_app(df):
     def get_users_count():
         try:
             result_df = queries.count_user(df)
-            return jsonify(result_df)
+            return jsonify([row.asDict() for row in result_df.collect()])
         except Exception as e:
             return jsonify({"error": str(e)}), 500
+        
+
+    @app.route("/viewStats", methods=["GET"])
+    def get_views_stats():
+        try:
+            result_df = queries.calculate_views_stats(df)
+            return jsonify([row.asDict() for row in result_df.collect()])
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
+
+    @app.route("/commentStats", methods=["GET"])
+    def get_comments_stats():
+        try:
+            result_df = queries.calculate_comments_stats(df)
+            return jsonify([row.asDict() for row in result_df.collect()])
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
+        
+
+    @app.route("/avgViewsPerYear", methods=["GET"])
+    def get_average_views_per_year():
+        try:
+            result_df = queries.calculate_views_by_year(df)
+            return jsonify([row.asDict() for row in result_df.collect()])
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
+        
+    @app.route("/avgCommentsPerYear", methods=["GET"])
+    def get_average_comments_per_year():
+        try:
+            result_df = queries.calculate_comments_by_year(df)
+            return jsonify([row.asDict() for row in result_df.collect()])
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
+
+
+    @app.route("/firstPostPerYear", methods=["GET"])
+    def get_first_post_count_per_year():
+        try:
+            result_df = queries.first_post_per_year_month(df)
+
+            # Raggruppare i risultati per anno
+            result_by_year = {}
+            for row in result_df.collect():
+                year = row["year"]
+                month_number = row["month"]
+                count = row["count"]
+
+                if year not in result_by_year:
+                    result_by_year[year] = []
+
+                result_by_year[year].append({"month": month_number, "count": count})
+
+        
+            result = [
+                {"year": year, "months": months}
+                for year, months in result_by_year.items()
+            ]
+
+            return jsonify(result)
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
+
 
 
     @app.route("/topTags", methods=["GET"])
@@ -151,12 +213,57 @@ def create_app(df):
             return jsonify([row.asDict() for row in paginated_df.collect()])
         except Exception as e:
             return jsonify({"error": str(e)}), 500
+        
 
-
-    @app.route("/top5Owners", methods=["GET"])
-    def top_owners():
+    @app.route("/proUsersDistribution", methods=["GET"])
+    def get_pro_users_distribution():
         try:
-            result_df = queries.calculate_top_owners(df)
+            result_df = queries.calculate_pro_user_distribution(df)
+            return jsonify([row.asDict() for row in result_df.collect()])
+        except Exception as e:
+
+            return jsonify({"error": str(e)}), 500
+
+
+    @app.route("/accuracyDistribution", methods=["GET"])
+    def get_accuracy_distribution():
+        try:
+            result_df = queries.calculate_accuracy_distribution(df)
+            return jsonify([row.asDict() for row in result_df.collect()])
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
+
+
+    @app.route("/searchOwner", methods=["GET"])
+    def search_owner_rank():
+        try:
+            username = request.args.get("username")
+            if not username:
+                return jsonify("error: parametro username mancante"), 400
+            result_df = queries.search_owner(df,username)
+            return jsonify([row.asDict() for row in result_df.collect()])
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
+        
+
+    
+    
+    @app.route("/searchOwnerM", methods=["GET"])
+    def search_owner_rankM():
+        try:
+            username = request.args.get("username")
+            if not username:
+                return jsonify("error: parametro username mancante"), 400
+            result_df = queries.search_owner_mod(df,username)
+            return jsonify([row.asDict() for row in result_df.collect()])
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
+        
+
+    @app.route("/top50Owners", methods=["GET"])
+    def get_top_50_owners():
+        try:
+            result_df = queries.top_50_owners(df)
             return jsonify([row.asDict() for row in result_df.collect()])
         except Exception as e:
             return jsonify({"error": str(e)}), 500
@@ -169,7 +276,20 @@ def create_app(df):
             k = int(request.args.get("k", 5))
 
             # Eseguiamo il clustering sull'internal DataFrame
-            result = mlqueries.run_kmeans_clustering(df, k)
+            result= mlqueries.run_kmeans_clustering(df, k)
+
+            return jsonify(result)
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
+        
+    @app.route('/runKMeans2', methods=['GET'])
+    def run_kmeans2():
+        try:
+            # Numero di cluster specificato come parametro
+            k = int(request.args.get("k", 5))
+
+            # Eseguiamo il clustering sull'internal DataFrame
+            result= mlqueries.run_kmeans_clustering2(df, k)
 
             return jsonify(result)
         except Exception as e:
@@ -185,7 +305,6 @@ def create_app(df):
             min_confidence = data.get('min_confidence', 0.6)
             target_tags = data.get('target_tags', None)
 
-            # Calcola le regole di associazione
             result_df =mlqueries.calculate_and_filter_association_rules(
                 df, 
                 min_support=min_support, 
@@ -199,42 +318,59 @@ def create_app(df):
             return jsonify({"error": str(e)}), 500
         
 
-        
-
-
-    @app.route('/search_photos', methods=['POST'])
+    @app.route('/searchPhotos', methods=['POST'])
     def search_photos_endpoint():
         try:
-            # Recupera i parametri dal corpo della richiesta JSON
-            data = request.get_json()  # Corretto per POST con dati JSON
+            
+            data = request.get_json()  
             if data is None:
                 return jsonify({"error": "No JSON data provided"}), 400
 
             keyword = data.get('keyword')
             data_inizio = data.get('dataInizio')
             data_fine = data.get('dataFine')
-            tag_list = data.get('tag_list', [])  # Valore predefinito come lista vuota
+            tag_list = data.get('tag_list', [])  
             page = int(request.args.get("page", 1))
             page_size = int(request.args.get("page_size", 100))
-            # Esegui la query
+            
             result_df = queries.search_photos(df, keyword=keyword, dataInizio=data_inizio, dataFine=data_fine, tag_list=tag_list)
             paginated_df = queries.paginate_dataframe_sql(result_df, page, page_size)
-            # Converto il risultato in un formato leggibile
+        
             return jsonify([row.asDict() for row in paginated_df.collect()])
         except Exception as e:
             return jsonify({"error": str(e)}), 500
         
 
-
     @app.route('/years', methods=['GET'])
     def get_years_list():
         try:
-            # Esegui la query
             result_df = queries.get_years(df)
             return jsonify([row.asDict() for row in result_df.collect()])
         except Exception as e:
             return jsonify({"error": str(e)}), 500
+        
+
+    @app.route("/getTopBrandAndCameras", methods=["GET"])
+    def get_top_barnd_cameras():
+        try:
+            result_df = queries.top_brands_with_models(df)
+            return jsonify([row.asDict() for row in result_df.collect()])
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
+        
+
+    @app.route("/topCamerasPerYear", methods=["GET"])
+    def get_top_barnd_cameras_per_year():
+        try:
+            result_df = queries.top_models_per_year(df)
+            return jsonify([row.asDict() for row in result_df.collect()])
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
+
+
 
     return app
+
+
 
 
